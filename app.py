@@ -177,10 +177,10 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 currency_key = "USD" if currency_symbol == "$" else "KHR"
                 amount = float(amt_match.group(2).replace(",", ""))
                 
-                tx_match = re.search(r"(?:trx|tx|transaction|ref|reference|no|id)(?:\.|\b)[:\s-]+(\w+)", message.text, re.IGNORECASE)
+                tx_match = re.search(r"(?:trx|tx|transaction|ref|reference|no|id)(?:\.|\b)(?:\s*id)?[:\s-]+(\d+)", message.text, re.IGNORECASE)
                 transaction_id = tx_match.group(1).strip() if tx_match else "Unknown ID"
                 
-                cust_match = re.search(r"(?:paid\s+by|from|sender|transfer\s+by)[:\s]+(.+?)(?:\s*(?:\(\*|\bon\b|\bat\b|via|vial|\d{2}:\d{2}))", message.text, re.IGNORECASE)
+                cust_match = re.search(r"(?:paid\s+by|from|sender|transfer\s+by)[:\s]+([^(\n]+)", message.text, re.IGNORECASE)
                 customer_name = cust_match.group(1).strip() if cust_match else "Unknown Customer"
                 customer_name = re.sub(r"[*()\-:,\.]", "", customer_name).strip()
 
