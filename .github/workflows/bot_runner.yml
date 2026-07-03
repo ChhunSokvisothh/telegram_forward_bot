@@ -1,0 +1,34 @@
+name: 24/7 Telegram Metric Engine
+
+on:
+  schedule:
+    # ⏱️ The Cron Job: Fires a fresh runner loop every 4 hours to prevent timeout blocks
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # Allows you to manually click "Run" from the GitHub UI to start it right now
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python Runtime Environment
+        uses: actions/setup-python@v5
+        with:
+          python-python-version: '3.11'
+
+      - name: Inject Workspace Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-telegram-bot python-dotenv
+
+      - name: Initialize Telegram Engine Loop
+        timeout-minutes: 345 # ⏳ Gracefully self-terminates at 5 hours & 45 minutes right before GitHub's 6-hour hammer drops
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MASTER_GROUP_ID: ${{ secrets.MASTER_GROUP_ID }}
+          SUPER_ADMIN_ID: ${{ secrets.SUPER_ADMIN_ID }}
+          DATABASE_CHANNEL_ID: ${{ secrets.DATABASE_CHANNEL_ID }}
+        run: |
+          python app.py
