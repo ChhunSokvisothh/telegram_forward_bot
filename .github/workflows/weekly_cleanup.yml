@@ -1,0 +1,105 @@
+name: Weekly Cloud Sync & Auto-Delete
+
+on:
+  schedule:
+    # ⏱️ Runs automatically every Sunday at midnight UTC
+    - cron: '0 0 * * 0'
+  workflow_dispatch: # Allows you to trigger the backup manually anytime
+
+jobs:
+  backup-and-rotate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches full history for proper tracking cleanup
+
+      - name: Setup Python Runtime Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Runtime Dependencies
+        run: pip install python-telegram-bot python-dotenv
+
+      - name: Run Backup & Data Rotation Engine
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          DATABASE_CHANNEL_ID: ${{ secrets.DATABASE_CHANNEL_ID }}
+          MASTER_GROUP_ID: ${{ secrets.MASTER_GROUP_ID }}
+          SUPER_ADMIN_ID: ${{ secrets.SUPER_ADMIN_ID }}
+        run: |
+          cat << 'EOF' > rotate_logs.py
+          import os
+          import csv
+          import asyncio
+          from datetime import datetime, timedelta
+          from telegram import Bot
+
+          async def main():
+              bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
+              channel_id = int(os.getenv("DATABASE_CHANNEL_ID"))
+              
+              today = datetime.now()
+              cutoff_date = today - timedelta(days=90) # 🗓️ 3-Month Retention Horizon
+              
+              master_file = "master_historical_ledger.csv"
+              file_exists = os.path.isfile(master_file)
+              
+              # Read existing entries to prevent duplication loops
+              existing_ids = set()
+              if file_exists:
+                  with open(master_file, mode='r', encoding='utf-8') as f:
+                      reader = csv.reader(f)
+                      next(reader, None) # Skip header
+                      for row in reader:
+                          if len(row) > 1:
+                              existing_ids.add(row[1])
+
+              new_rows = []
+              print("🔍 Syncing live ledger blocks from Telegram cloud...")
+              
+              async for msg in bot.get_chat_history(chat_id=channel_id, limit=5000):
+                  if msg.text and "[LEDGER_ROW]" in msg.text:
+                      lines = msg.text.split("\n")
+                      tx_date_str = lines[1].replace("Date: ", "").strip()
+                      tx_date = datetime.strptime(tx_date_str, "%Y-%m-%d")
+                      
+                      # Skip elements older than 3 months
+                      if tx_date < cutoff_date:
+                          continue
+                          
+                      tx_id = lines[2].replace("ID: ", "").strip()
+                      cust = lines[3].replace("Cust: ", "").strip()
+                      cur = lines[4].replace("Cur: ", "").strip()
+                      amt = lines[5].replace("Amt: ", "").strip()
+                      salesperson = lines[6].replace("Channel: ", "").strip()
+                      
+                      if tx_id not in existing_ids:
+                          new_rows.append([tx_date_str, f'="{tx_id}"', cust, cur, amt, salesperson])
+
+              # Append new data blocks dynamically
+              if new_rows:
+                  with open(master_file, mode='a', newline='', encoding='utf-8-sig') as f:
+                      writer = csv.writer(f)
+                      if not file_exists:
+                          writer.writerow(["Date", "Transaction ID", "Customer Name", "Currency", "Amount", "Salesperson"])
+                      writer.writerows(reversed(new_rows)) # Chronological ordering
+                  print(f"✅ Appended {len(new_rows)} new historical rows to tracking ledger.")
+              else:
+                  print("✨ Ledger up to date. No new records found.")
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
+          python rotate_logs.py
+          rm rotate_logs.py
+
+      - name: Commit and Push Rotated Ledger Back to GitHub
+        run: |
+          git config --global user.name "Automated Ledger Bot"
+          git config --global user.email "bot@github.com"
+          git add master_historical_ledger.csv
+          git diff-index --quiet HEAD || git commit -m "📊 Weekly automated log append & 90-day retention cleanup [skip ci]"
+          git push origin main
