@@ -1,0 +1,47 @@
+{
+    "-5251019206": {
+        "topic_id": 4,
+        "group_name": "One Fraternity 03",
+        "sales": {}
+    },
+    "-5377144272": {
+        "topic_id": 2,
+        "group_name": "One Fraternity 01",
+        "sales": {
+            "2026-07-02": {
+                "USD": 0.03,
+                "KHR": 0.0,
+                "tx_count": 2,
+                "transactions": [
+                    {
+                        "tx_id": "178298018328015",
+                        "customer_name": "SEANG OUDOM",
+                        "currency": "USD",
+                        "amount": 0.01
+                    },
+                    {
+                        "tx_id": "178298049379597",
+                        "customer_name": "SEANG OUDOM",
+                        "currency": "USD",
+                        "amount": 0.02
+                    }
+                ]
+            }
+        }
+    },
+    "-5361945197": {
+        "topic_id": 3,
+        "group_name": "One Fraternity 02",
+        "sales": {}
+    },
+    "-5592659987": {
+        "topic_id": 215,
+        "group_name": "One Fraternity 05",
+        "sales": {}
+    },
+    "-5306737286": {
+        "topic_id": 81,
+        "group_name": "One Fraternity 04",
+        "sales": {}
+    }
+}
