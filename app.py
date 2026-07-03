@@ -3,10 +3,9 @@ import os
 import re
 import csv
 from datetime import datetime
-import time
 from dotenv import load_dotenv
 from telegram import Update, InputFile
-from telegram.error import NetworkError, Conflict
+from telegram.error import Conflict
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 # --- CORE LOG HANDLER SETUP ---
@@ -44,17 +43,18 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # --- COMMAND HANDLERS ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     instructions = (
-        "📖 Telegram Metric Tracker Bot - Cloud Edition\n"
+        "📖 Telegram Metric Tracker Bot\n"
         "───────────────────────────────\n"
-        "🧮 For Cashiers & Admins:\n"
-        "• `/01` — Fast-map this group to Master Topic thread 01.\n"
-        "• `/02` — Fast-map this group to Master Topic thread 02.\n"
-        "• `/link [Topic_ID]` — Standard manual mapping method.\n"
-        "• `/export` — Run this in the Master Group to download the active ledger CSV."
+        "📊 Commands:\n"
+        "• `/01` — SE Sales Summary Engine\n"
+        "• `/02` — Cashier & Admin Metrics (Master Group Only)\n"
+        "• `/link [Topic_ID]` — Link sales group to a Master Topic thread\n"
+        "• `/export` — Download the active ledger CSV (Master Group Only)"
     )
     await update.message.reply_text(instructions, parse_mode="Markdown")
 
 async def link_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Standard method to map a group workspace to a Master Topic thread."""
     chat_id = update.effective_chat.id
     if chat_id == MASTER_GROUP_ID:
         return
@@ -68,25 +68,25 @@ async def link_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SALES_MAP[chat_id] = {"topic_id": topic_num, "group_name": group_title}
     await update.message.reply_text(f"✅ Linked '{group_title}' to Master Topic ID: {topic_num}")
 
-# 🎯 DEDICATED /01 COMMAND HANDLER
+# 📊 Restored /01: SE Sales Summary Engine
 async def command_01(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id == MASTER_GROUP_ID:
-        return
-    group_title = update.effective_chat.title or "Sales Channel 01"
-    SALES_MAP[chat_id] = {"topic_id": "01", "group_name": group_title}
-    await update.message.reply_text(f"✅ Fast-Linked '{group_title}' to Master Topic ID: 01")
+    """/01: Allows Sales Executives to summarize their sales data."""
+    # Add your specific SE summary processing logic here
+    await update.message.reply_text("📊 **SE Sales Summary Processing Engine Active...**")
 
-# 🎯 DEDICATED /02 COMMAND HANDLER
+# 🔒 Restored /02: Cashier & Admin Metrics (Strictly Master Group)
 async def command_02(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/02: Metrics restricted exclusively to Cashiers and Admins inside the Master Group."""
     chat_id = update.effective_chat.id
-    if chat_id == MASTER_GROUP_ID:
+    if chat_id != MASTER_GROUP_ID:
+        await update.message.reply_text("❌ Access Denied: This command is restricted to the Admin Master Group.")
         return
-    group_title = update.effective_chat.title or "Sales Channel 02"
-    SALES_MAP[chat_id] = {"topic_id": "02", "group_name": group_title}
-    await update.message.reply_text(f"✅ Fast-Linked '{group_title}' to Master Topic ID: 02")
+    
+    # Add your strict Cashier/Admin metric calculations here
+    await update.message.reply_text("🔑 **Cashier & Admin Metric Dashboard Access Granted.**")
 
 async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/export: Instantly delivers the CSV ledger file (Strictly Master Group)."""
     chat_id = update.effective_chat.id
     if chat_id != MASTER_GROUP_ID:
         return
@@ -166,7 +166,7 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     is_usd = currency_key == "USD"
                     writer.writerow([
-                        today, f'="{transaction_id}"', customer_name,
+                        today, f'="' + transaction_id + '"', customer_name,
                         amount if is_usd else 0.0, 1 if is_usd else 0,
                         amount if not is_usd else 0.0, 0 if is_usd else 1,
                         1, handler_name
@@ -187,15 +187,16 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Transmission error: {e}")
 
-# --- POLING SYSTEM INITIALIZATION ---
+# --- POLLING SYSTEM INITIALIZATION ---
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Command Registration
+    # Register Core Command Vault Handlers
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("link", link_group))
     application.add_handler(CommandHandler("export", export_csv))
     
+    # 🎯 Restored Explicit Operational Functions
     application.add_handler(CommandHandler("01", command_01))
     application.add_handler(CommandHandler("02", command_02))
     
