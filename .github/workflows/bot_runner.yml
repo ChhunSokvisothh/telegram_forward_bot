@@ -16,7 +16,7 @@ jobs:
       - name: Setup Python Runtime Environment
         uses: actions/setup-python@v5
         with:
-          python-python-version: '3.11'
+          python-version: '3.11'
 
       - name: Inject Workspace Dependencies
         run: |
