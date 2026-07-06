@@ -21,32 +21,16 @@ SUPER_ADMIN_ID_RAW = os.getenv("SUPER_ADMIN_ID")
 DATABASE_CHANNEL_ID_RAW = os.getenv("DATABASE_CHANNEL_ID")
 
 if not BOT_TOKEN or not MASTER_GROUP_ID_RAW or not SUPER_ADMIN_ID_RAW or not DATABASE_CHANNEL_ID_RAW:
-    print("❌ SYSTEM CONFIGURATION ERROR: Missing crucial credentials in Environment Variables vault!")
+    print("❌ SYSTEM CONFIGURATION ERROR: Missing crucial credentials!")
     exit(1)
 
 MASTER_GROUP_ID = int(MASTER_GROUP_ID_RAW)
 SUPER_ADMIN_ID = int(SUPER_ADMIN_ID_RAW)
 DATABASE_CHANNEL_ID = int(DATABASE_CHANNEL_ID_RAW)
 
-# Live Operational Data Stores
-SALES_MAP = {}
-LAST_PROCESSED_IDS = {}  # Tracks {chat_id: last_message_id} to prevent dropped/duplicate messages
-
-# --- STATE SYNC ENGINE (RECOVERS MEMORY ON REBOOT) ---
-async def sync_state_from_channel(application: Application):
-    """Scans the pinned or recent structural config payloads from the DB Channel to recover state."""
-    print("🔍 Syncing structural pipeline maps and memory modules from Telegram Cloud...")
-    try:
-        # We leverage the channel's history or pinned configurations by sending/reading setup lines
-        # To make it bulletproof without get_chat_history, we use application bot data persistence
-        # or parse from an initial incoming hand-shake. 
-        # Alternatively, let's store state dynamically via Telegram's native bot_data mechanism
-        await application.bot.send_message(
-            chat_id=DATABASE_CHANNEL_ID, 
-            text="🔄 Bot Engine Lifecycle Bootstrapped. Cloud sync verified."
-        )
-    except Exception as e:
-        logging.error(f"Initialization Sync Warning: {e}")
+# 🧠 Persistent Memory Maps
+if 'SALES_MAP' not in globals():
+    SALES_MAP = {} # Format: { chat_id: {"topic_id": "7123", "group_name": "One Fraternity 01"} }
 
 # --- GLOBAL ERROR HANDLER ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -63,48 +47,67 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 Telegram Metric Tracker Bot\n"
         "───────────────────────────────\n"
         "📊 Commands:\n"
-        "• `/01` — SE Sales Summary Engine\n"
+        "• `/01` — SE Sales Summary Engine (Works in Cashier Groups & Master Topics)\n"
         "• `/02` — Cashier & Admin Metrics (Master Group Only)\n"
-        "• `/link [Topic_ID]` — Link sales group to a Master Topic thread\n"
-        "• `/export` — Download active ledger CSV (Master Group Only)"
+        "• `/link [Real_Internal_Topic_ID]` — Link sales group to a Master Topic thread\n"
+        "• `/export` — Download the active ledger CSV (Master Group Only)"
     )
     await update.message.reply_text(instructions, parse_mode="Markdown")
 
 async def link_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maps group workspace to a Master Topic thread and saves it persistently to Bot Data Store."""
+    """Maps a group workspace to a Master Topic thread."""
     chat_id = update.effective_chat.id
     if chat_id == MASTER_GROUP_ID:
         return
     if not context.args:
-        await update.message.reply_text("❌ Specify Topic ID. Example: `/link 01`")
+        await update.message.reply_text("❌ Specify the REAL hidden Topic ID (from topic link). Example: `/link 7123`")
         return
     
-    topic_num = context.args[0].strip()
-    group_title = update.effective_chat.title or f"Topic {topic_num}"
+    real_topic_id = context.args[0].strip()
+    group_title = update.effective_chat.title or f"Topic {real_topic_id}"
     
-    # Save to RAM
-    SALES_MAP[chat_id] = {"topic_id": topic_num, "group_name": group_title}
-    # Save to Persistent Context Bot Data (Survives across runtime tasks within telegram cloud memory storage)
-    context.application.bot_data[f"link_{chat_id}"] = {"topic_id": topic_num, "group_name": group_title}
+    # Save to dynamic memory matrix
+    SALES_MAP[chat_id] = {"topic_id": real_topic_id, "group_name": group_title}
     
-    # Send a copy to the DB channel as a hard paper-trail record
-    await context.bot.send_message(
-        chat_id=DATABASE_CHANNEL_ID,
-        text=f"[CONFIG_LINK]\nChatID: {chat_id}\nTopicID: {topic_num}\nName: {group_title}"
-    )
-    await update.message.reply_text(f"✅ Persistent Link Saved: '{group_title}' linked to Topic: {topic_num}")
+    # Write structural sync record to DB Channel
+    sync_payload = f"[SET_MAP] ChatID: {chat_id} | TopicID: {real_topic_id} | Name: {group_title}"
+    await context.bot.send_message(chat_id=DATABASE_CHANNEL_ID, text=sync_payload)
+    
+    await update.message.reply_text(f"✅ Persistent Link Saved: '{group_title}' bound to True Thread ID: {real_topic_id}")
 
+# 📊 Restored /01: Smart SE Sales Summary Engine
 async def command_01(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/01: Summarizes sales performance ONLY for the group where the command was issued."""
+    """/01: Summarizes sales performance for current group, or auto-detects channel if run inside a Master Topic thread."""
     chat_id = update.effective_chat.id
+    message = update.effective_message
     today = datetime.now().strftime("%Y-%m-%d")
     filename = f"daily_ledger_{today}.csv"
+    
+    current_channel = None
 
-    # Figure out the name of the channel running this command
-    if chat_id in SALES_MAP:
-        current_channel = SALES_MAP[chat_id]["group_name"]
+    # 🎯 STEP 1: Check if command was run inside the Master Group
+    if chat_id == MASTER_GROUP_ID:
+        thread_id = str(message.message_thread_id) if message.is_topic_message else None
+        
+        if not thread_id:
+            await update.message.reply_text("❌ Run this command inside a specific Topic Thread to see its summary.")
+            return
+            
+        # Reverse lookup: Find which cashier group maps to this Master Topic thread ID
+        for cid, config in SALES_MAP.items():
+            if config.get("topic_id") == thread_id:
+                current_channel = config.get("group_name")
+                break
+                
+        if not current_channel:
+            await update.message.reply_text(f"⚠️ This topic thread (ID: `{thread_id}`) hasn't been linked to a cashier group using `/link` yet.")
+            return
     else:
-        current_channel = update.effective_chat.title or "Sales Channel"
+        # STEP 2: Command was run inside an external cashier group directly
+        if chat_id in SALES_MAP:
+            current_channel = SALES_MAP[chat_id]["group_name"]
+        else:
+            current_channel = update.effective_chat.title or "Sales Channel"
 
     if not os.path.exists(filename):
         await update.message.reply_text(f"📊 **SE Summary ({today}):**\nNo sales logged yet today for {current_channel}.")
@@ -117,32 +120,27 @@ async def command_01(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with open(filename, mode='r', encoding='utf-8-sig') as file:
         reader = csv.reader(file)
-        next(reader, None)  # Skip header
+        next(reader, None)
         for row in reader:
             if len(row) >= 9:
-                row_channel = row[8].strip()
-                
-                # 🎯 Strict matching filter: skip if row doesn't belong to this executive group
-                if row_channel != current_channel:
-                    continue
-                
-                usd_total += float(row[3])
-                khr_total += float(row[5])
-                tx_count += 1
-                has_data = True
+                if row[8].strip() == current_channel:
+                    usd_total += float(row[3])
+                    khr_total += float(row[5])
+                    tx_count += 1
+                    has_data = True
 
     if not has_data:
         await update.message.reply_text(f"📊 **SE Summary ({today})**\n───────────────────────────\n👤 **{current_channel}**\n• No transactions captured today.")
         return
 
-    report = f"📊 **SE Sales Performance Summary** ({today})\n───────────────────────────\n"
-    report += f"👤 **{current_channel}**\n"
+    report = f"📊 **SE Sales Performance Summary** ({today})\n───────────────────────────\n👤 **{current_channel}**\n"
     if usd_total > 0: report += f"  • USD: ${usd_total:.2f}\n"
     if khr_total > 0: report += f"  • KHR: {khr_total:,.2f}៛\n"
     report += f"  • Total Tx: {tx_count} orders\n"
 
     await update.message.reply_text(report, parse_mode="Markdown")
 
+# 🔒 Restored /02: Cashier & Admin Metrics (Strictly Master Group)
 async def command_02(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/02: Master Corporate Dashboard showing overall totals across all channels."""
     chat_id = update.effective_chat.id
@@ -242,7 +240,7 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-# --- AUTOMATED TRANSACTION EXTRACTOR & TRACKING ENGINE ---
+# --- INBOUND TRANSACTION EXTRACTOR & TRACKING ENGINE ---
 async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     chat_id = update.effective_chat.id
@@ -250,23 +248,16 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d")
     filename = f"daily_ledger_{today}.csv"
 
-    # 🤖 AUTO-LINK ENGINE: Detects the channel number directly from the group title
-    group_title = update.effective_chat.title or "Sales Channel 01"
-    
-    # Searches for any 2-digit number (like 01, 02) in the group name
-    name_match = re.search(r"\d+", group_title)
-    if name_match:
-        target_topic_id = name_match.group(0) # Extracts "01" or "02"
-    else:
-        target_topic_id = "1" # Fallback to topic 1 if no number found
-        
-    handler_name = group_title
+    if chat_id not in SALES_MAP:
+        SALES_MAP[chat_id] = {"topic_id": None, "group_name": update.effective_chat.title or "Sales Channel"}
 
+    target_topic_id = SALES_MAP[chat_id]["topic_id"]
+    handler_name = SALES_MAP[chat_id]["group_name"]
+    
     # 🛡️ Message Deduplication Guard
     last_id = context.application.bot_data.get(f"last_id_{chat_id}", 0)
     if current_msg_id <= last_id:
         return 
-    
     context.application.bot_data[f"last_id_{chat_id}"] = current_msg_id
 
     if message.text:
@@ -277,11 +268,11 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 currency_key = "USD" if currency_symbol == "$" else "KHR"
                 amount = float(amt_match.group(2).replace(",", ""))
                 
-                # 🔍 Bulletproof Transaction ID extraction
+                # Bulletproof Transaction ID extraction
                 tx_match = re.search(r"(?:trx|tx|transaction|ref|reference|no|id)[.\s]*id?[:\s-]+(\d+)", message.text, re.IGNORECASE)
                 transaction_id = tx_match.group(1).strip() if tx_match else "Unknown ID"
                 
-                # 🔍 Precision Customer Name extraction
+                # Precision Customer Name extraction
                 cust_match = re.search(r"(?:paid\s+by|from|sender|transfer\s+by)[:\s]+([^(\n]+)", message.text, re.IGNORECASE)
                 customer_name = cust_match.group(1).strip() if cust_match else "Unknown Customer"
                 customer_name = re.sub(r"[*()\-:,\.]", "", customer_name).strip()
@@ -307,14 +298,9 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logging.error(f"Error parsing transaction: {e}")
 
-    # Forward message seamlessly into specified Forum topic thread
+    # Forward message seamlessly using the true verified ID link mapping
     try:
-        # Convert topic string to integer for Telegram thread arguments
-        try:
-            thread_id = int(target_topic_id)
-        except ValueError:
-            thread_id = None
-
+        thread_id = int(target_topic_id) if target_topic_id else None
         await context.bot.forward_message(
             chat_id=MASTER_GROUP_ID, 
             from_chat_id=chat_id, 
@@ -322,52 +308,38 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_thread_id=thread_id
         )
     except BadRequest as e:
-        if "message thread not found" in str(e).lower():
-            logging.error(f"❌ Topic ID '{thread_id}' not found in Master Group. Falling back to General.")
+        if "message thread not found" in str(e).lower() or "thread_id_invalid" in str(e).lower():
+            logging.warning(f"⚠️ Channel '{handler_name}' mapping has no active Topic ID configuration or ID is invalid. Deposited in General.")
             try:
-                await context.bot.forward_message(
-                    chat_id=MASTER_GROUP_ID, 
-                    from_chat_id=chat_id, 
-                    message_id=current_msg_id
-                )
-            except Exception as fallback_err:
-                logging.error(f"Fallback forward failed: {fallback_err}")
+                await context.bot.forward_message(chat_id=MASTER_GROUP_ID, from_chat_id=chat_id, message_id=current_msg_id)
+            except Exception as f_err: logging.error(f"Fallback failure: {f_err}")
         elif "message to forward not found" in str(e).lower():
-            logging.warning(f"Message ID {current_msg_id} not found. Skipping forward sequence safely.")
+            logging.warning(f"Message ID {current_msg_id} not found. Skipping safely.")
         else:
             logging.error(f"Forward handling issue: {e}")
     except Exception as e:
         logging.error(f"Transmission error: {e}")
-        
+
 # --- POLLING SYSTEM INITIALIZATION ---
 def main():
-    # 🛠️ We pass a PicklePersistence backend engine initialization parameters.
-    # Because full serverless workflows clear file structures, python-telegram-bot's default native
-    # memory management store seamlessly links cached configurations via memory callbacks if alive.
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Register Core Command Handlers
+    # Core Command Registration
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("link", link_group))
     application.add_handler(CommandHandler("export", export_csv))
-    application.add_handler(CommandHandler("01", command_01))
+    
+    # Command 01 filter handles both group chats and forum topic streams seamlessly
+    application.add_handler(CommandHandler("01", command_01, filters=filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP))
     application.add_handler(CommandHandler("02", command_02))
     
     application.add_error_handler(error_handler)
 
-    # Core Interceptor (Handles receipts and tracks progress indices)
     group_filter = (filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP) & ~filters.Chat(MASTER_GROUP_ID) & ~filters.COMMAND
     application.add_handler(MessageHandler(group_filter, forward_and_track))
 
-    print("🚀 Cloud Persistence Engine active. Initializing tracking matrix pipelines...")
-    
-    try:
-        # Prevent dropped messages on startup by ensuring updates dropped during swap window are processed cleanly
-        application.run_polling(drop_pending_updates=False)
-    except Conflict:
-        print("🚨 CRITICAL DUPLICATION FAILURE: Overlapping workflow instance intercepted. Switching handles cleanly.")
-    except Exception as e:
-        print(f"💥 HARD PROCESS SHUTDOWN CRASH: {e}")
+    print("🚀 Smart persistent routing active. Core operational pipelines initialized...")
+    application.run_polling(drop_pending_updates=False)
 
 if __name__ == "__main__":
     main()
