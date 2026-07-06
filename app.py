@@ -242,7 +242,7 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-# --- INBOUND TRANSACTION EXTRACTOR & TRACKING ENGINE ---
+# --- AUTOMATED TRANSACTION EXTRACTOR & TRACKING ENGINE ---
 async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     chat_id = update.effective_chat.id
@@ -250,24 +250,23 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d")
     filename = f"daily_ledger_{today}.csv"
 
-    # Dynamic Memory Reconstruction: If RAM was wiped out by a machine swap, pull from context bot_data
-    if chat_id not in SALES_MAP:
-        persisted_link = context.application.bot_data.get(f"link_{chat_id}")
-        if persisted_link:
-            SALES_MAP[chat_id] = persisted_link
-        else:
-            # Fallback configuration profile so operations never halt
-            SALES_MAP[chat_id] = {"topic_id": "1", "group_name": update.effective_chat.title or "Sales Channel"}
-
-    target_topic_id = SALES_MAP[chat_id]["topic_id"]
-    handler_name = SALES_MAP[chat_id]["group_name"]
+    # 🤖 AUTO-LINK ENGINE: Detects the channel number directly from the group title
+    group_title = update.effective_chat.title or "Sales Channel 01"
     
-    # 🛡️ Message Deduplication & Catchup Sequence Guardian
+    # Searches for any 2-digit number (like 01, 02) in the group name
+    name_match = re.search(r"\d+", group_title)
+    if name_match:
+        target_topic_id = name_match.group(0) # Extracts "01" or "02"
+    else:
+        target_topic_id = "1" # Fallback to topic 1 if no number found
+        
+    handler_name = group_title
+
+    # 🛡️ Message Deduplication Guard
     last_id = context.application.bot_data.get(f"last_id_{chat_id}", 0)
     if current_msg_id <= last_id:
-        return # Skip processing to prevent duplication logs if Telegram double-sends down a pipeline
+        return 
     
-    # Update state tracker tracking indices
     context.application.bot_data[f"last_id_{chat_id}"] = current_msg_id
 
     if message.text:
@@ -278,9 +277,11 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 currency_key = "USD" if currency_symbol == "$" else "KHR"
                 amount = float(amt_match.group(2).replace(",", ""))
                 
+                # 🔍 Bulletproof Transaction ID extraction
                 tx_match = re.search(r"(?:trx|tx|transaction|ref|reference|no|id)[.\s]*id?[:\s-]+(\d+)", message.text, re.IGNORECASE)
                 transaction_id = tx_match.group(1).strip() if tx_match else "Unknown ID"
                 
+                # 🔍 Precision Customer Name extraction
                 cust_match = re.search(r"(?:paid\s+by|from|sender|transfer\s+by)[:\s]+([^(\n]+)", message.text, re.IGNORECASE)
                 customer_name = cust_match.group(1).strip() if cust_match else "Unknown Customer"
                 customer_name = re.sub(r"[*()\-:,\.]", "", customer_name).strip()
@@ -308,20 +309,36 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Forward message seamlessly into specified Forum topic thread
     try:
+        # Convert topic string to integer for Telegram thread arguments
+        try:
+            thread_id = int(target_topic_id)
+        except ValueError:
+            thread_id = None
+
         await context.bot.forward_message(
             chat_id=MASTER_GROUP_ID, 
             from_chat_id=chat_id, 
             message_id=current_msg_id, 
-            message_thread_id=int(target_topic_id)
+            message_thread_id=thread_id
         )
     except BadRequest as e:
-        if "message to forward not found" in str(e).lower():
+        if "message thread not found" in str(e).lower():
+            logging.error(f"❌ Topic ID '{thread_id}' not found in Master Group. Falling back to General.")
+            try:
+                await context.bot.forward_message(
+                    chat_id=MASTER_GROUP_ID, 
+                    from_chat_id=chat_id, 
+                    message_id=current_msg_id
+                )
+            except Exception as fallback_err:
+                logging.error(f"Fallback forward failed: {fallback_err}")
+        elif "message to forward not found" in str(e).lower():
             logging.warning(f"Message ID {current_msg_id} not found. Skipping forward sequence safely.")
         else:
             logging.error(f"Forward handling issue: {e}")
     except Exception as e:
         logging.error(f"Transmission error: {e}")
-
+        
 # --- POLLING SYSTEM INITIALIZATION ---
 def main():
     # 🛠️ We pass a PicklePersistence backend engine initialization parameters.
