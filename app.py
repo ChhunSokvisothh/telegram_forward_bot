@@ -95,37 +95,51 @@ async def link_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Persistent Link Saved: '{group_title}' linked to Topic: {topic_num}")
 
 async def command_01(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/01: Summarizes sales performance grouped by each Sales Executive channel today."""
+    """/01: Summarizes sales performance ONLY for the group where the command was issued."""
+    chat_id = update.effective_chat.id
     today = datetime.now().strftime("%Y-%m-%d")
     filename = f"daily_ledger_{today}.csv"
 
+    # Figure out the name of the channel running this command
+    if chat_id in SALES_MAP:
+        current_channel = SALES_MAP[chat_id]["group_name"]
+    else:
+        current_channel = update.effective_chat.title or "Sales Channel"
+
     if not os.path.exists(filename):
-        await update.message.reply_text(f"📊 **SE Summary ({today}):**\nNo sales logged yet today.")
+        await update.message.reply_text(f"📊 **SE Summary ({today}):**\nNo sales logged yet today for {current_channel}.")
         return
 
-    se_data = {}
+    usd_total = 0.0
+    khr_total = 0.0
+    tx_count = 0
+    has_data = False
+
     with open(filename, mode='r', encoding='utf-8-sig') as file:
         reader = csv.reader(file)
-        next(reader, None)
+        next(reader, None)  # Skip header
         for row in reader:
             if len(row) >= 9:
-                se = row[8].strip()
-                usd_amt = float(row[3])
-                khr_amt = float(row[5])
+                row_channel = row[8].strip()
                 
-                if se not in se_data:
-                    se_data[se] = {"usd": 0.0, "khr": 0.0, "count": 0}
+                # 🎯 Strict matching filter: skip if row doesn't belong to this executive group
+                if row_channel != current_channel:
+                    continue
                 
-                se_data[se]["usd"] += usd_amt
-                se_data[se]["khr"] += khr_amt
-                se_data[se]["count"] += 1
+                usd_total += float(row[3])
+                khr_total += float(row[5])
+                tx_count += 1
+                has_data = True
+
+    if not has_data:
+        await update.message.reply_text(f"📊 **SE Summary ({today})**\n───────────────────────────\n👤 **{current_channel}**\n• No transactions captured today.")
+        return
 
     report = f"📊 **SE Sales Performance Summary** ({today})\n───────────────────────────\n"
-    for se, metrics in se_data.items():
-        report += f"👤 **{se}**\n"
-        if metrics["usd"] > 0: report += f"  • USD: ${metrics['usd']:.2f}\n"
-        if metrics["khr"] > 0: report += f"  • KHR: {metrics['khr']:,.2f}៛\n"
-        report += f"  • Total Tx: {metrics['count']} orders\n\n"
+    report += f"👤 **{current_channel}**\n"
+    if usd_total > 0: report += f"  • USD: ${usd_total:.2f}\n"
+    if khr_total > 0: report += f"  • KHR: {khr_total:,.2f}៛\n"
+    report += f"  • Total Tx: {tx_count} orders\n"
 
     await update.message.reply_text(report, parse_mode="Markdown")
 
@@ -264,7 +278,7 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 currency_key = "USD" if currency_symbol == "$" else "KHR"
                 amount = float(amt_match.group(2).replace(",", ""))
                 
-                tx_match = re.search(r"(?:trx|tx|transaction|ref|reference|no|id)(:\.|\b)(?:\s*id)?[:\s-]+(\d+)", message.text, re.IGNORECASE)
+                tx_match = re.search(r"(?:trx|tx|transaction|ref|reference|no|id)[.\s]*id?[:\s-]+(\d+)", message.text, re.IGNORECASE)
                 transaction_id = tx_match.group(1).strip() if tx_match else "Unknown ID"
                 
                 cust_match = re.search(r"(?:paid\s+by|from|sender|transfer\s+by)[:\s]+([^(\n]+)", message.text, re.IGNORECASE)
