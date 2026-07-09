@@ -2,11 +2,14 @@ import logging
 import os
 import re
 import csv
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InputFile
 from telegram.error import Conflict, BadRequest
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+
 
 # --- CORE LOG HANDLER SETUP ---
 logging.basicConfig(
@@ -334,9 +337,20 @@ async def post_init(application: Application) -> None:
         pass
     except Exception as e:
         logging.error(f"Post-init recovery warning: {e}")
+        
+def run_fake_web_server():
+    """Spins up a tiny server on the port Render demands so the deploy passes."""
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    print(f"📡 Keeping Render Happy: Internal dummy server listening on port {port}")
+    server.serve_forever()
 
 # --- POLLING SYSTEM INITIALIZATION ---
 def main():
+    # 1. Start the fake web server in a separate background thread
+    threading.Thread(target=run_fake_web_server, daemon=True).start()
+
+    # 2. Start your Telegram Bot exactly like normal
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
     application.add_handler(CommandHandler("help", help_command))
