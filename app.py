@@ -38,16 +38,22 @@ SALES_MAP = {}
 try:
     raw_dict = json.loads(TOPIC_MAPPINGS_RAW)
     for k, v in raw_dict.items():
-        # Cast group Chat ID and Topic ID strictly to integers for exact matching
-        chat_id_int = int(str(k).strip())
+        # Strip any extra spaces/quotes and cast key to int
+        clean_key = str(k).strip().replace('"', '').replace("'", "")
+        chat_id_int = int(clean_key)
+        
         parsed_topic_id = int(v["topic_id"]) if v.get("topic_id") is not None else None
         
-        SALES_MAP[chat_id_int] = {
+        entry = {
             "topic_id": parsed_topic_id,
             "group_name": v.get("group_name", "Sales Channel")
         }
         
-    logging.info(f"✅ Loaded {len(SALES_MAP)} group-to-topic mappings successfully.")
+        # Store key as both integer AND string to prevent lookup type mismatches
+        SALES_MAP[chat_id_int] = entry
+        SALES_MAP[clean_key] = entry
+        
+    logging.info(f"✅ Loaded {len(SALES_MAP)} group-to-topic mappings successfully. Keys loaded: {list(SALES_MAP.keys())}")
 except Exception as e:
     logging.error(f"❌ Failed to parse TOPIC_MAPPINGS environment variable: {e}")
 
