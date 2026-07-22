@@ -267,6 +267,11 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 8. COMMANDS ---
 async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # If in master group, must be inside a topic thread
+    if update.effective_chat.id == MASTER_GROUP_ID and not update.effective_message.message_thread_id:
+        await update.message.reply_text("⛔ Use this command inside a topic thread.")
+        return
+
     today = datetime.now().strftime("%Y-%m-%d")
     channel_name = resolve_channel_name(update)
     if not channel_name:
@@ -293,6 +298,10 @@ async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 async def command_02_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
+     if update.effective_chat.id != MASTER_GROUP_ID:
+        await update.message.reply_text("⛔ This command is only available in the master group.")
+        return
+    
     if SUPER_ADMIN_ID and update.effective_user.id != SUPER_ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized.")
         return
@@ -330,6 +339,11 @@ async def command_02_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def command_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Must be called from master group only
+    if update.effective_chat.id != MASTER_GROUP_ID:
+        await update.message.reply_text("⛔ This command is only available in the master group.")
+        return
+        
     target_date = context.args[0].strip() if context.args else datetime.now().strftime("%Y-%m-%d")
     records = await read_database_channel(context, target_date)
     if not records:
