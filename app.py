@@ -2,16 +2,17 @@ import logging
 import os
 import re
 import csv
+import json
 import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InputFile
-from telegram.error import Conflict, BadRequest
+from telegram.error import BadRequest
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 
-# --- CORE LOG HANDLER SETUP ---
+# --- CORE LOG HANDLER SETUP ---     
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -22,6 +23,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MASTER_GROUP_ID_RAW = os.getenv("MASTER_GROUP_ID")
 SUPER_ADMIN_ID_RAW = os.getenv("SUPER_ADMIN_ID")
 DATABASE_CHANNEL_ID_RAW = os.getenv("DATABASE_CHANNEL_ID")
+TOPIC_MAPPINGS_RAW = os.getenv("TOPIC_MAPPINGS", "{}")
 
 if not BOT_TOKEN or not MASTER_GROUP_ID_RAW or not SUPER_ADMIN_ID_RAW or not DATABASE_CHANNEL_ID_RAW:
     print("❌ SYSTEM CONFIGURATION ERROR: Missing crucial credentials!")
@@ -31,9 +33,14 @@ MASTER_GROUP_ID = int(MASTER_GROUP_ID_RAW)
 SUPER_ADMIN_ID = int(SUPER_ADMIN_ID_RAW)
 DATABASE_CHANNEL_ID = int(DATABASE_CHANNEL_ID_RAW)
 
-# 🧠 Live Operational Data Stores
-if 'SALES_MAP' not in globals():
-    SALES_MAP = {} # Format: { chat_id: {"topic_id": "7123", "group_name": "One Fraternity 01"} }
+# 🧠 Parse Hardcoded Topic Mappings from Environment Variable
+try:
+    # Converts string keys from JSON into integer Chat IDs
+    SALES_MAP = {int(k): v for k, v in json.loads(TOPIC_MAPPINGS_RAW).items()}
+    logging.info(f"✅ Loaded {len(SALES_MAP)} topic mappings from environment.")
+except Exception as e:
+    logging.error(f"❌ Failed to parse TOPIC_MAPPINGS environment variable: {e}")
+    SALES_MAP = {}
 
 # --- GLOBAL ERROR HANDLER ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -52,32 +59,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Commands:\n"
         "• `/01` — SE Sales Summary Engine (Works in Cashier Groups & Master Topics)\n"
         "• `/02` — Cashier & Admin Metrics (Master Group Only)\n"
-        "• `/link [Real_Internal_Topic_ID]` — Link sales group to a Master Topic thread\n"
         "• `/export` — Download the active ledger CSV (Master Group Only)"
     )
     await update.message.reply_text(instructions, parse_mode="Markdown")
 
-async def link_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maps a group workspace to a Master Topic thread and saves a backup log to the DB Channel."""
-    chat_id = update.effective_chat.id
-    if chat_id == MASTER_GROUP_ID:
-        return
-    if not context.args:
-        await update.message.reply_text("❌ Specify the REAL hidden Topic ID (from topic link). Example: `/link 7123`")
-        return
-    
-    real_topic_id = context.args[0].strip()
-    group_title = update.effective_chat.title or f"Topic {real_topic_id}"
-    
-    SALES_MAP[chat_id] = {"topic_id": real_topic_id, "group_name": group_title}
-    
-    # Send configuration record backup to channel
-    sync_payload = f"[SET_MAP]\nChatID: {chat_id}\nTopicID: {real_topic_id}\nName: {group_title}"
-    await context.bot.send_message(chat_id=DATABASE_CHANNEL_ID, text=sync_payload)
-    
-    await update.message.reply_text(f"✅ Persistent Link Saved: '{group_title}' bound to True Thread ID: {real_topic_id}")
-
-# 📊 Restored /01: Smart SE Sales Summary Engine
+# 📊 /01: Smart SE Sales Summary Engine
 async def command_01(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/01: Summarizes sales performance for current group, or auto-detects channel inside a Master Topic thread."""
     chat_id = update.effective_chat.id
@@ -88,18 +74,18 @@ async def command_01(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_channel = None
 
     if chat_id == MASTER_GROUP_ID:
-        thread_id = str(message.message_thread_id) if message.is_topic_message else None
+        thread_id = message.message_thread_id if message.is_topic_message else None
         if not thread_id:
             await update.message.reply_text("❌ Run this command inside a specific Topic Thread to see its summary.")
             return
             
         for cid, config in SALES_MAP.items():
-            if config.get("topic_id") == thread_id:
+            if int(config.get("topic_id", 0)) == int(thread_id):
                 current_channel = config.get("group_name")
                 break
                 
         if not current_channel:
-            await update.message.reply_text(f"⚠️ This topic thread (ID: `{thread_id}`) hasn't been linked using `/link` yet.")
+            await update.message.reply_text(f"⚠️ This topic thread (ID: `{thread_id}`) is not registered in TOPIC_MAPPINGS.")
             return
     else:
         if chat_id in SALES_MAP:
@@ -138,7 +124,7 @@ async def command_01(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(report, parse_mode="Markdown")
 
-# 🔒 Restored /02: Cashier & Admin Metrics (Strictly Master Group)
+# 🔒 /02: Cashier & Admin Metrics (Strictly Master Group)
 async def command_02(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/02: Master Corporate Dashboard showing overall totals across all channels."""
     chat_id = update.effective_chat.id
@@ -235,7 +221,7 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         os.remove(export_filename)
-    except:
+    except Exception:
         pass
 
 # --- INBOUND TRANSACTION EXTRACTOR & TRACKING ENGINE ---
@@ -246,11 +232,10 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d")
     filename = f"daily_ledger_{today}.csv"
 
-    if chat_id not in SALES_MAP:
-        SALES_MAP[chat_id] = {"topic_id": None, "group_name": update.effective_chat.title or "Sales Channel"}
-
-    target_topic_id = SALES_MAP[chat_id]["topic_id"]
-    handler_name = SALES_MAP[chat_id]["group_name"]
+    # Fetch configuration for incoming channel
+    config = SALES_MAP.get(chat_id, {})
+    target_topic_id = config.get("topic_id")
+    handler_name = config.get("group_name", update.effective_chat.title or "Sales Channel")
     
     # 🛡️ Message Deduplication Guard
     last_id = context.application.bot_data.get(f"last_id_{chat_id}", 0)
@@ -294,9 +279,13 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logging.error(f"Error parsing transaction: {e}")
 
-    # Forward message seamlessly using the true verified ID link mapping
+    # Forward message seamlessly using the pre-configured topic ID
     try:
         thread_id = int(target_topic_id) if target_topic_id else None
+        
+        if not thread_id:
+            logging.warning(f"⚠️ Chat ID {chat_id} ('{handler_name}') has no registered topic ID in TOPIC_MAPPINGS. Forwarding to General.")
+        
         await context.bot.forward_message(
             chat_id=MASTER_GROUP_ID, 
             from_chat_id=chat_id, 
@@ -305,10 +294,11 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except BadRequest as e:
         if "message thread not found" in str(e).lower() or "thread_id_invalid" in str(e).lower():
-            logging.warning(f"⚠️ Channel '{handler_name}' mapping has no active Topic ID configuration or ID is invalid. Deposited in General.")
+            logging.warning(f"⚠️ Channel '{handler_name}' has an invalid Topic ID ({target_topic_id}). Forwarding to General.")
             try:
                 await context.bot.forward_message(chat_id=MASTER_GROUP_ID, from_chat_id=chat_id, message_id=current_msg_id)
-            except Exception as f_err: logging.error(f"Fallback failure: {f_err}")
+            except Exception as f_err: 
+                logging.error(f"Fallback failure: {f_err}")
         elif "message to forward not found" in str(e).lower():
             logging.warning(f"Message ID {current_msg_id} not found. Skipping safely.")
         else:
@@ -316,45 +306,31 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Transmission error: {e}")
 
-# --- 🔄 LIFECYCLE RECOVERY CORE ENGINE ---
+# --- 🔄 LIFECYCLE INITIALIZATION ---
 async def post_init(application: Application) -> None:
-    """Triggered on booting up a fresh machine instance. Scrapes DB Channel to rebuild RAM maps and the today CSV ledger."""
-    print("🔍 ENGINE LIFECYCLE INITIALIZED: Running cloud sync memory download sequence...")
+    """Pre-generates CSV header if missing upon bot startup."""
     today = datetime.now().strftime("%Y-%m-%d")
     filename = f"daily_ledger_{today}.csv"
     
-    # Pre-generate standard file headers
     if not os.path.exists(filename):
         with open(filename, mode='w', newline='', encoding='utf-8-sig') as file:
             writer = csv.writer(file)
             writer.writerow(["Date", "Transaction ID", "Customer Name", "USD Total", "USD Transaction Count", "KHR Total", "KHR Transaction Count", "Transaction Count", "Salesperson"])
 
-    try:
-        # 📡 Read back up to the last 100 entries in your backup channel room to parse mapping link structures and records
-        # Because standard bots cannot scrape channels directly, we rely on the bot reading messages it was exposed to, 
-        # or we gracefully notify the administrator of active tracking status. 
-        # To fetch live logs directly from the channel history feed channel, we trigger a target look-up hook.
-        pass
-    except Exception as e:
-        logging.error(f"Post-init recovery warning: {e}")
-        
 def run_fake_web_server():
-    """Spins up a tiny server on the port Render demands so the deploy passes."""
+    """Spins up a tiny HTTP server for web hosts requiring open port checks."""
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    print(f"📡 Keeping Render Happy: Internal dummy server listening on port {port}")
+    print(f"📡 Keeping Web Host Happy: Listening on port {port}")
     server.serve_forever()
 
 # --- POLLING SYSTEM INITIALIZATION ---
 def main():
-    # 1. Start the fake web server in a separate background thread
     threading.Thread(target=run_fake_web_server, daemon=True).start()
 
-    # 2. Start your Telegram Bot exactly like normal
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("link", link_group))
     application.add_handler(CommandHandler("export", export_csv))
     application.add_handler(CommandHandler("01", command_01, filters=filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP))
     application.add_handler(CommandHandler("02", command_02))
