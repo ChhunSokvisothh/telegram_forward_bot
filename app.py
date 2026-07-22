@@ -160,7 +160,7 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 5. COMMAND HANDLERS ---
 async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Channel-Specific Transaction Summary"""
+    """Channel-Specific Transaction Summary - Scans all records for today"""
     chat_id = update.effective_chat.id
     config = SALES_MAP.get(chat_id) or SALES_MAP.get(str(chat_id))
     
@@ -180,11 +180,15 @@ async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
     with open(filename, mode='r', encoding='utf-8-sig') as file:
         reader = csv.DictReader(file)
         for row in reader:
-            raw_sp = row.get("Salesperson", "") or ""
-            salesperson = raw_sp.strip().lower()
-            
-            match_mapped = mapped_name and (salesperson == mapped_name.lower())
-            match_title = chat_title and (salesperson == chat_title.lower())
+            # Ensure row date matches today
+            row_date = (row.get("Date") or "").strip()
+            if row_date and row_date != today:
+                continue
+
+            # Match salesperson against mapped group name or chat title
+            raw_sp = (row.get("Salesperson") or "").strip().lower()
+            match_mapped = mapped_name and (raw_sp == mapped_name.lower())
+            match_title = chat_title and (raw_sp == chat_title.lower())
 
             if match_mapped or match_title:
                 usd_total += safe_num(row.get("USD Total"), float)
@@ -206,7 +210,7 @@ async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(summary_msg, parse_mode="Markdown")
 
 async def command_02_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Global Corporate Vault Summary (Admin Restricted)"""
+    """Global Corporate Vault Summary - Scans all records across channels for today"""
     user_id = update.effective_user.id
     if SUPER_ADMIN_ID and user_id != SUPER_ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized access.")
@@ -226,6 +230,11 @@ async def command_02_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(filename, mode='r', encoding='utf-8-sig') as file:
             reader = csv.DictReader(file)
             for row in reader:
+                # Ensure row date matches today
+                row_date = (row.get("Date") or "").strip()
+                if row_date and row_date != today:
+                    continue
+
                 usd_total += safe_num(row.get("USD Total"), float)
                 usd_count += safe_num(row.get("USD Transaction Count"), int)
                 khr_total += safe_num(row.get("KHR Total"), float)
