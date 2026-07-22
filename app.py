@@ -34,13 +34,18 @@ SUPER_ADMIN_ID = int(SUPER_ADMIN_ID_RAW)
 DATABASE_CHANNEL_ID = int(DATABASE_CHANNEL_ID_RAW)
 
 # 🧠 Parse Hardcoded Topic Mappings from Environment Variable
+SALES_MAP = {}
 try:
-    # Converts string keys from JSON into integer Chat IDs
-    SALES_MAP = {int(k): v for k, v in json.loads(TOPIC_MAPPINGS_RAW).items()}
-    logging.info(f"✅ Loaded {len(SALES_MAP)} topic mappings from environment.")
+    raw_dict = json.loads(TOPIC_MAPPINGS_RAW)
+    for k, v in raw_dict.items():
+        # Cast group Chat ID and Topic ID strictly to integers for exact matching
+        chat_id_int = int(str(k).strip())
+        v["topic_id"] = int(v["topic_id"]) if v.get("topic_id") is not None else None
+        SALES_MAP[chat_id_int] = v
+        
+    logging.info(f"✅ Loaded {len(SALES_MAP)} group-to-topic mappings successfully.")
 except Exception as e:
     logging.error(f"❌ Failed to parse TOPIC_MAPPINGS environment variable: {e}")
-    SALES_MAP = {}
 
 # --- GLOBAL ERROR HANDLER ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -80,7 +85,7 @@ async def command_01(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         for cid, config in SALES_MAP.items():
-            if int(config.get("topic_id", 0)) == int(thread_id):
+            if config.get("topic_id") == int(thread_id):
                 current_channel = config.get("group_name")
                 break
                 
@@ -232,10 +237,16 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d")
     filename = f"daily_ledger_{today}.csv"
 
-    # Fetch configuration for incoming channel
-    config = SALES_MAP.get(chat_id, {})
-    target_topic_id = config.get("topic_id")
-    handler_name = config.get("group_name", update.effective_chat.title or "Sales Channel")
+    # Match SE group directly against integer keys in SALES_MAP
+    config = SALES_MAP.get(chat_id)
+    
+    if not config:
+        logging.warning(f"⚠️ Message received from unmapped Group ID: {chat_id}. Forwarding to General topic.")
+        target_topic_id = None
+        handler_name = update.effective_chat.title or "Sales Channel"
+    else:
+        target_topic_id = config.get("topic_id")
+        handler_name = config.get("group_name", update.effective_chat.title or "Sales Channel")
     
     # 🛡️ Message Deduplication Guard
     last_id = context.application.bot_data.get(f"last_id_{chat_id}", 0)
@@ -279,12 +290,9 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logging.error(f"Error parsing transaction: {e}")
 
-    # Forward message seamlessly using the pre-configured topic ID
+    # Forward message using target_topic_id
     try:
-        thread_id = int(target_topic_id) if target_topic_id else None
-        
-        if not thread_id:
-            logging.warning(f"⚠️ Chat ID {chat_id} ('{handler_name}') has no registered topic ID in TOPIC_MAPPINGS. Forwarding to General.")
+        thread_id = int(target_topic_id) if target_topic_id is not None else None
         
         await context.bot.forward_message(
             chat_id=MASTER_GROUP_ID, 
@@ -292,6 +300,8 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_id=current_msg_id, 
             message_thread_id=thread_id
         )
+        logging.info(f"➡️ Forwarded message from '{handler_name}' ({chat_id}) to Topic ID: {thread_id}")
+
     except BadRequest as e:
         if "message thread not found" in str(e).lower() or "thread_id_invalid" in str(e).lower():
             logging.warning(f"⚠️ Channel '{handler_name}' has an invalid Topic ID ({target_topic_id}). Forwarding to General.")
