@@ -33,29 +33,33 @@ MASTER_GROUP_ID = int(MASTER_GROUP_ID_RAW)
 SUPER_ADMIN_ID = int(SUPER_ADMIN_ID_RAW)
 DATABASE_CHANNEL_ID = int(DATABASE_CHANNEL_ID_RAW)
 
-# 🧠 Parse Hardcoded Topic Mappings from Environment Variable
+# 🧠 Parse Hardcoded Topic Mappings with Sanitization Guard
 SALES_MAP = {}
 try:
-    raw_dict = json.loads(TOPIC_MAPPINGS_RAW)
+    # Clean up non-breaking spaces (\xa0), extra whitespace, or newlines from secret fields
+    sanitized_json_str = TOPIC_MAPPINGS_RAW.replace('\xa0', ' ').strip()
+    raw_dict = json.loads(sanitized_json_str)
+    
     for k, v in raw_dict.items():
-        # Strip any extra spaces/quotes and cast key to int
-        clean_key = str(k).strip().replace('"', '').replace("'", "")
-        chat_id_int = int(clean_key)
+        clean_key_str = str(k).strip()
+        chat_id_int = int(clean_key_str)
         
         parsed_topic_id = int(v["topic_id"]) if v.get("topic_id") is not None else None
         
-        entry = {
+        mapping_entry = {
             "topic_id": parsed_topic_id,
             "group_name": v.get("group_name", "Sales Channel")
         }
         
-        # Store key as both integer AND string to prevent lookup type mismatches
-        SALES_MAP[chat_id_int] = entry
-        SALES_MAP[clean_key] = entry
+        # Save both integer and string representations to prevent key type mismatch
+        SALES_MAP[chat_id_int] = mapping_entry
+        SALES_MAP[clean_key_str] = mapping_entry
         
-    logging.info(f"✅ Loaded {len(SALES_MAP)} group-to-topic mappings successfully. Keys loaded: {list(SALES_MAP.keys())}")
+    logging.info(f"✅ Loaded {len(raw_dict)} group-to-topic mappings successfully.")
+    logging.info(f"🔍 Active Mapped Keys: {list(SALES_MAP.keys())}")
 except Exception as e:
     logging.error(f"❌ Failed to parse TOPIC_MAPPINGS environment variable: {e}")
+    logging.error(f"📄 Raw Secret Value Received: {repr(TOPIC_MAPPINGS_RAW)}")
 
 # --- GLOBAL ERROR HANDLER ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -247,8 +251,8 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d")
     filename = f"daily_ledger_{today}.csv"
 
-    # Match SE group directly against integer keys in SALES_MAP
-    config = SALES_MAP.get(chat_id)
+    # Match SE group directly using key lookup (supports int and str keys)
+    config = SALES_MAP.get(chat_id) or SALES_MAP.get(str(chat_id))
     
     # 🚫 STRICT GUARD: If chat is not mapped OR topic_id is missing, DO NOT FORWARD
     if not config or config.get("topic_id") is None:
@@ -303,7 +307,6 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🚀 Forward message ONLY if target_topic_id is present
     if target_topic_id is None:
-        # We still logged the transaction above, but we stop execution here to prevent forwarding to General
         return
 
     try:
@@ -318,7 +321,6 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.info(f"➡️ Forwarded message from '{handler_name}' ({chat_id}) to Topic ID: {thread_id}")
 
     except BadRequest as e:
-        # NO FALLBACK TO GENERAL HERE: Log the issue and do nothing
         logging.error(f"❌ Telegram API Error when forwarding to Topic ID {target_topic_id} for '{handler_name}': {e}")
     except Exception as e:
         logging.error(f"Transmission error: {e}")
