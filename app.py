@@ -40,8 +40,12 @@ try:
     for k, v in raw_dict.items():
         # Cast group Chat ID and Topic ID strictly to integers for exact matching
         chat_id_int = int(str(k).strip())
-        v["topic_id"] = int(v["topic_id"]) if v.get("topic_id") is not None else None
-        SALES_MAP[chat_id_int] = v
+        parsed_topic_id = int(v["topic_id"]) if v.get("topic_id") is not None else None
+        
+        SALES_MAP[chat_id_int] = {
+            "topic_id": parsed_topic_id,
+            "group_name": v.get("group_name", "Sales Channel")
+        }
         
     logging.info(f"✅ Loaded {len(SALES_MAP)} group-to-topic mappings successfully.")
 except Exception as e:
@@ -240,8 +244,9 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Match SE group directly against integer keys in SALES_MAP
     config = SALES_MAP.get(chat_id)
     
-    if not config:
-        logging.warning(f"⚠️ Message received from unmapped Group ID: {chat_id}. Forwarding to General topic.")
+    # 🚫 STRICT GUARD: If chat is not mapped OR topic_id is missing, DO NOT FORWARD
+    if not config or config.get("topic_id") is None:
+        logging.warning(f"🛑 Skipping forward: Group ID {chat_id} is not mapped to a valid Topic ID.")
         target_topic_id = None
         handler_name = update.effective_chat.title or "Sales Channel"
     else:
@@ -290,9 +295,13 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logging.error(f"Error parsing transaction: {e}")
 
-    # Forward message using target_topic_id
+    # 🚀 Forward message ONLY if target_topic_id is present
+    if target_topic_id is None:
+        # We still logged the transaction above, but we stop execution here to prevent forwarding to General
+        return
+
     try:
-        thread_id = int(target_topic_id) if target_topic_id is not None else None
+        thread_id = int(target_topic_id)
         
         await context.bot.forward_message(
             chat_id=MASTER_GROUP_ID, 
@@ -303,16 +312,8 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.info(f"➡️ Forwarded message from '{handler_name}' ({chat_id}) to Topic ID: {thread_id}")
 
     except BadRequest as e:
-        if "message thread not found" in str(e).lower() or "thread_id_invalid" in str(e).lower():
-            logging.warning(f"⚠️ Channel '{handler_name}' has an invalid Topic ID ({target_topic_id}). Forwarding to General.")
-            try:
-                await context.bot.forward_message(chat_id=MASTER_GROUP_ID, from_chat_id=chat_id, message_id=current_msg_id)
-            except Exception as f_err: 
-                logging.error(f"Fallback failure: {f_err}")
-        elif "message to forward not found" in str(e).lower():
-            logging.warning(f"Message ID {current_msg_id} not found. Skipping safely.")
-        else:
-            logging.error(f"Forward handling issue: {e}")
+        # NO FALLBACK TO GENERAL HERE: Log the issue and do nothing
+        logging.error(f"❌ Telegram API Error when forwarding to Topic ID {target_topic_id} for '{handler_name}': {e}")
     except Exception as e:
         logging.error(f"Transmission error: {e}")
 
