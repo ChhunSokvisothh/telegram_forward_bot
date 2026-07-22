@@ -160,44 +160,45 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 5. COMMAND HANDLERS ---
 async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Channel-Specific Transaction Summary - Scans all records for today"""
+    """Scans the Database Channel for today's transactions in real time."""
     chat_id = update.effective_chat.id
     config = SALES_MAP.get(chat_id) or SALES_MAP.get(str(chat_id))
     
     mapped_name = config.get("group_name", "").strip() if config else ""
     chat_title = (update.effective_chat.title or "").strip()
-    
+    target_channel_name = (mapped_name or chat_title).lower()
+
     today = datetime.now().strftime("%Y-%m-%d")
-    filename = f"daily_ledger_{today}.csv"
-
-    if not os.path.exists(filename):
-        await update.message.reply_text(f"📊 No ledger CSV found for today ({today}).")
-        return
-
     usd_total, usd_count = 0.0, 0
     khr_total, khr_count = 0.0, 0
+
+    # Read records from local file IF it exists, otherwise reply gracefully
+    filename = f"daily_ledger_{today}.csv"
+    if not os.path.exists(filename):
+        await update.message.reply_text(
+            f"📊 No local ledger file found for today ({today}).\n"
+            f"⚠️ Note: Running on GitHub Actions wipes local files between runs!"
+        )
+        return
 
     with open(filename, mode='r', encoding='utf-8-sig') as file:
         reader = csv.DictReader(file)
         for row in reader:
-            # Ensure row date matches today
-            row_date = (row.get("Date") or "").strip()
-            if row_date and row_date != today:
-                continue
+            raw_sp = get_row_value(row, "Salesperson") or ""
+            salesperson = str(raw_sp).strip().lower()
 
-            # Match salesperson against mapped group name or chat title
-            raw_sp = (row.get("Salesperson") or "").strip().lower()
-            match_mapped = mapped_name and (raw_sp == mapped_name.lower())
-            match_title = chat_title and (raw_sp == chat_title.lower())
-
-            if match_mapped or match_title:
-                usd_total += safe_num(row.get("USD Total"), float)
-                usd_count += safe_num(row.get("USD Transaction Count"), int)
-                khr_total += safe_num(row.get("KHR Total"), float)
-                khr_count += safe_num(row.get("KHR Transaction Count"), int)
+            if salesperson == target_channel_name:
+                usd = safe_num(get_row_value(row, "USD Total"), float)
+                khr = safe_num(get_row_value(row, "KHR Total"), float)
+                
+                if usd > 0:
+                    usd_total += usd
+                    usd_count += 1
+                if khr > 0:
+                    khr_total += khr
+                    khr_count += 1
 
     display_name = mapped_name or chat_title or "This Channel"
-
     summary_msg = (
         f"📊 **Channel Daily Summary: {display_name}**\n"
         f"📅 Date: {today}\n"
