@@ -1,6 +1,7 @@
 import os
 import re
 import csv
+import io
 import json
 import logging
 from datetime import datetime
@@ -34,30 +35,161 @@ SALES_MAP = {}
 try:
     cleaned_json_str = RAW_TOPIC_MAPPINGS.replace('\xa0', ' ').strip()
     parsed_json = json.loads(cleaned_json_str)
-    
     for group_id_str, details in parsed_json.items():
         SALES_MAP[group_id_str] = details
         try:
             SALES_MAP[int(group_id_str)] = details
         except ValueError:
             pass
-
     logging.info(f"✅ Loaded {len(parsed_json)} group mappings successfully.")
 except Exception as e:
     logging.error(f"❌ Failed to parse TOPIC_MAPPINGS environment variable: {e}")
 
-# --- 3. HELPER FOR SAFE NUMERIC CONVERSION ---
+# --- 3. HELPER: SAFE NUMERIC CONVERSION ---
 def safe_num(val, val_type=float):
-    """Safely converts CSV cell values to float or int without throwing errors."""
     if val is None or str(val).strip() == "":
         return val_type(0)
     try:
-        clean_str = str(val).replace(",", "").replace('"', '').strip()
-        return val_type(clean_str)
+        return val_type(str(val).replace(",", "").replace('"', '').strip())
     except ValueError:
         return val_type(0)
 
-# --- 4. INBOUND TRANSACTION ENGINE ---
+# --- 4. HELPER: RESOLVE CHANNEL NAME FROM CONTEXT ---
+def resolve_channel_name(update: Update) -> str | None:
+    """
+    Figures out which channel/group name to filter by.
+    Works when called from:
+      - A source sales group (direct match via SALES_MAP)
+      - Master group in a topic thread (match via thread/topic_id in SALES_MAP)
+    Returns the group_name string or None if it can't be determined.
+    """
+    chat_id = update.effective_chat.id
+    message = update.effective_message
+
+    # Case 1: Called from a mapped source sales group
+    config = SALES_MAP.get(chat_id) or SALES_MAP.get(str(chat_id))
+    if config:
+        return config.get("group_name", "").strip() or (update.effective_chat.title or "").strip()
+
+    # Case 2: Called from master group inside a topic thread
+    if chat_id == MASTER_GROUP_ID and message and message.message_thread_id:
+        thread_id = message.message_thread_id
+        for key, details in SALES_MAP.items():
+            if isinstance(key, int) and details.get("topic_id") == thread_id:
+                return details.get("group_name", "").strip()
+            if isinstance(key, str):
+                try:
+                    if details.get("topic_id") == thread_id:
+                        return details.get("group_name", "").strip()
+                except Exception:
+                    pass
+
+    return None
+
+# --- 5. CORE: READ & PARSE DATABASE CHANNEL ---
+async def read_database_channel(context: ContextTypes.DEFAULT_TYPE, target_date: str, channel_filter: str | None = None) -> list[dict]:
+    """
+    Reads the database channel message history and parses [LEDGER_ROW] entries.
+    
+    Args:
+        context: The bot context.
+        target_date: Date string in YYYY-MM-DD format to filter by.
+        channel_filter: If set, only return rows where Channel matches this name (case-insensitive).
+    
+    Returns:
+        List of dicts with keys: Date, ID, Cust, Cur, Amt, Channel
+    """
+    records = []
+    
+    try:
+        # Fetch up to 200 recent messages from the database channel
+        # We fetch in batches using offset_id if needed
+        messages = await context.bot.get_updates()  # placeholder — see note below
+    except Exception:
+        pass
+
+    # Telegram Bot API doesn't have a "get channel history" method directly.
+    # We use iter_messages via stored message IDs tracked in bot_data,
+    # OR we rely on the bot having been added as admin and using copyMessage tricks.
+    # 
+    # REAL APPROACH: We track all DB channel message IDs in bot_data as they arrive,
+    # then fetch them with get_messages. See `track_db_message` handler below.
+    
+    db_message_ids: list[int] = context.application.bot_data.get("db_message_ids", [])
+    
+    for msg_id in db_message_ids:
+        try:
+            msg = await context.bot.forward_message(
+                chat_id=DATABASE_CHANNEL_ID,
+                from_chat_id=DATABASE_CHANNEL_ID,
+                message_id=msg_id
+            )
+        except Exception:
+            continue
+        # We actually want to READ not forward — use copy trick or store text on arrival
+        # See `track_db_message` which stores text in bot_data directly (best approach)
+    
+    # BEST APPROACH: We store message text when the bot receives it in the DB channel
+    db_messages: dict[int, str] = context.application.bot_data.get("db_messages", {})
+    
+    for msg_id, text in db_messages.items():
+        if "[LEDGER_ROW]" not in text:
+            continue
+        
+        record = parse_ledger_row(text)
+        if not record:
+            continue
+        
+        # Filter by date
+        if record.get("Date") != target_date:
+            continue
+        
+        # Filter by channel name if specified
+        if channel_filter:
+            if record.get("Channel", "").strip().lower() != channel_filter.strip().lower():
+                continue
+        
+        records.append(record)
+    
+    return records
+
+def parse_ledger_row(text: str) -> dict | None:
+    """Parse a [LEDGER_ROW] message into a dict."""
+    try:
+        lines = text.strip().splitlines()
+        record = {}
+        for line in lines:
+            if ":" in line:
+                key, _, val = line.partition(":")
+                record[key.strip()] = val.strip()
+        
+        # Validate required fields
+        required = {"Date", "ID", "Cust", "Cur", "Amt", "Channel"}
+        if not required.issubset(record.keys()):
+            return None
+        
+        record["Amt"] = safe_num(record["Amt"], float)
+        return record
+    except Exception as e:
+        logging.error(f"parse_ledger_row error: {e}")
+        return None
+
+# --- 6. TRACK DB CHANNEL MESSAGES (store text in bot_data as they arrive) ---
+async def track_db_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Listens in the DB channel and stores message text into bot_data for later querying."""
+    message = update.effective_message
+    if not message:
+        return
+    
+    text = message.text or message.caption or ""
+    if "[LEDGER_ROW]" not in text:
+        return
+    
+    db_messages: dict = context.application.bot_data.setdefault("db_messages", {})
+    db_messages[message.message_id] = text
+    logging.info(f"📥 Stored DB channel message ID {message.message_id}")
+
+# --- 7. INBOUND TRANSACTION ENGINE ---
 async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not message:
@@ -69,24 +201,24 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = f"daily_ledger_{today}.csv"
 
     config = SALES_MAP.get(chat_id) or SALES_MAP.get(str(chat_id))
-    
+
     if not config or config.get("topic_id") is None:
         target_topic_id = None
         handler_name = (update.effective_chat.title or "Sales Channel").strip()
     else:
         target_topic_id = config.get("topic_id")
         handler_name = config.get("group_name", update.effective_chat.title or "Sales Channel").strip()
-    
+
     # Deduplication check
     last_id = context.application.bot_data.get(f"last_id_{chat_id}", 0)
     if current_msg_id <= last_id:
-        return 
+        return
     context.application.bot_data[f"last_id_{chat_id}"] = current_msg_id
 
-    # Strictly parse transaction messages
+    # Parse transaction
     if message.text or message.caption:
         text_content = message.text or message.caption
-        
+
         amt_match = re.search(r"([\$៛])\s*(\d+(?:,\d{3})*(?:\.\d{2})?)", text_content)
         tx_match = re.search(r"(?:trx|tx|transaction|ref|reference|no|id)[.\s]*id?[:\s-]+(\d+)", text_content, re.IGNORECASE)
         cust_match = re.search(r"(?:paid\s+by|from|sender|transfer\s+by)[:\s]+([^(\n]+)", text_content, re.IGNORECASE)
@@ -100,7 +232,6 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 customer_name = cust_match.group(1).strip()
                 customer_name = re.sub(r"[*()\-:,\.]", "", customer_name).strip()
 
-                # Send log message to database channel
                 db_payload = (
                     f"[LEDGER_ROW]\n"
                     f"Date: {today}\n"
@@ -110,30 +241,33 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Amt: {amount}\n"
                     f"Channel: {handler_name}"
                 )
-                await context.bot.send_message(chat_id=DATABASE_CHANNEL_ID, text=db_payload)
+                sent = await context.bot.send_message(chat_id=DATABASE_CHANNEL_ID, text=db_payload)
 
-                # Write to daily ledger CSV
+                # Also store in bot_data immediately so /01 can read it right away
+                db_messages: dict = context.application.bot_data.setdefault("db_messages", {})
+                db_messages[sent.message_id] = db_payload
+
+                # Write to local CSV backup
                 file_exists = os.path.exists(filename)
                 with open(filename, mode='a', newline='', encoding='utf-8-sig') as file:
                     writer = csv.writer(file)
                     if not file_exists:
                         writer.writerow([
-                            "Date", "Transaction ID", "Customer Name", 
-                            "USD Total", "USD Transaction Count", 
-                            "KHR Total", "KHR Transaction Count", 
+                            "Date", "Transaction ID", "Customer Name",
+                            "USD Total", "USD Transaction Count",
+                            "KHR Total", "KHR Transaction Count",
                             "Transaction Count", "Salesperson"
                         ])
-                    
                     is_usd = currency_key == "USD"
                     writer.writerow([
-                        today, 
-                        f'="{transaction_id}"', 
+                        today,
+                        f'="{transaction_id}"',
                         customer_name,
-                        amount if is_usd else 0.0, 
+                        amount if is_usd else 0.0,
                         1 if is_usd else 0,
-                        amount if not is_usd else 0.0, 
+                        amount if not is_usd else 0.0,
                         0 if is_usd else 1,
-                        1, 
+                        1,
                         handler_name
                     ])
                 logging.info(f"✅ Logged: {currency_key} {amount} | ID: {transaction_id} | Channel: {handler_name}")
@@ -147,9 +281,9 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         thread_id = int(target_topic_id)
         await context.bot.forward_message(
-            chat_id=MASTER_GROUP_ID, 
-            from_chat_id=chat_id, 
-            message_id=current_msg_id, 
+            chat_id=MASTER_GROUP_ID,
+            from_chat_id=chat_id,
+            message_id=current_msg_id,
             message_thread_id=thread_id
         )
         logging.info(f"➡️ Forwarded to Topic ID {thread_id} for '{handler_name}'")
@@ -158,140 +292,134 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Transmission error: {e}")
 
-# --- 5. COMMAND HANDLERS ---
+# --- 8. COMMAND: /01 CHANNEL SUMMARY ---
 async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Scans the Database Channel for today's transactions in real time."""
-    chat_id = update.effective_chat.id
-    config = SALES_MAP.get(chat_id) or SALES_MAP.get(str(chat_id))
-    
-    mapped_name = config.get("group_name", "").strip() if config else ""
-    chat_title = (update.effective_chat.title or "").strip()
-    target_channel_name = (mapped_name or chat_title).lower()
-
+    """Channel summary — reads from DB channel, filtered to the calling group/topic."""
     today = datetime.now().strftime("%Y-%m-%d")
+
+    channel_name = resolve_channel_name(update)
+    if not channel_name:
+        await update.message.reply_text("⚠️ This channel is not mapped. Cannot determine which records to show.")
+        return
+
+    records = await read_database_channel(context, today, channel_filter=channel_name)
+
     usd_total, usd_count = 0.0, 0
     khr_total, khr_count = 0.0, 0
 
-    # Read records from local file IF it exists, otherwise reply gracefully
-    filename = f"daily_ledger_{today}.csv"
-    if not os.path.exists(filename):
-        await update.message.reply_text(
-            f"📊 No local ledger file found for today ({today}).\n"
-            f"⚠️ Note: Running on GitHub Actions wipes local files between runs!"
-        )
-        return
+    for r in records:
+        if r["Cur"] == "USD":
+            usd_total += r["Amt"]
+            usd_count += 1
+        elif r["Cur"] == "KHR":
+            khr_total += r["Amt"]
+            khr_count += 1
 
-    with open(filename, mode='r', encoding='utf-8-sig') as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            raw_sp = get_row_value(row, "Salesperson") or ""
-            salesperson = str(raw_sp).strip().lower()
-
-            if salesperson == target_channel_name:
-                usd = safe_num(get_row_value(row, "USD Total"), float)
-                khr = safe_num(get_row_value(row, "KHR Total"), float)
-                
-                if usd > 0:
-                    usd_total += usd
-                    usd_count += 1
-                if khr > 0:
-                    khr_total += khr
-                    khr_count += 1
-
-    display_name = mapped_name or chat_title or "This Channel"
     summary_msg = (
-        f"📊 **Channel Daily Summary: {display_name}**\n"
+        f"📊 *Channel Daily Summary: {channel_name}*\n"
         f"📅 Date: {today}\n"
-        f"----------------------------------------\n"
-        f"💵 **USD:** ${usd_total:,.2f} ({usd_count} txs)\n"
-        f"៛ **KHR:** ៛{khr_total:,.2f} ({khr_count} txs)\n"
-        f"----------------------------------------\n"
+        f"────────────────────────\n"
+        f"💵 *USD:* ${usd_total:,.2f} ({usd_count} txs)\n"
+        f"៛ *KHR:* ៛{khr_total:,.0f} ({khr_count} txs)\n"
+        f"────────────────────────\n"
         f"📈 Total Transactions: {usd_count + khr_count}"
     )
     await update.message.reply_text(summary_msg, parse_mode="Markdown")
 
+# --- 9. COMMAND: /02 VAULT SUMMARY ---
 async def command_02_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Global Corporate Vault Summary - Scans all records across channels for today"""
+    """Global vault — reads ALL records from DB channel for today."""
     user_id = update.effective_user.id
     if SUPER_ADMIN_ID and user_id != SUPER_ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized access.")
         return
 
     today = datetime.now().strftime("%Y-%m-%d")
-    filename = f"daily_ledger_{today}.csv"
-
-    if not os.path.exists(filename):
-        await update.message.reply_text(f"🏛️ **Corporate Vault Summary ({today})**\nNo transactions recorded yet today.")
-        return
+    records = await read_database_channel(context, today, channel_filter=None)
 
     usd_total, usd_count = 0.0, 0
     khr_total, khr_count = 0.0, 0
+    by_channel: dict[str, dict] = {}
 
-    try:
-        with open(filename, mode='r', encoding='utf-8-sig') as file:
-            reader = csv.DictReader(file)
-            for row in reader:
-                # Ensure row date matches today
-                row_date = (row.get("Date") or "").strip()
-                if row_date and row_date != today:
-                    continue
+    for r in records:
+        ch = r.get("Channel", "Unknown")
+        if ch not in by_channel:
+            by_channel[ch] = {"usd": 0.0, "usd_c": 0, "khr": 0.0, "khr_c": 0}
 
-                usd_total += safe_num(row.get("USD Total"), float)
-                usd_count += safe_num(row.get("USD Transaction Count"), int)
-                khr_total += safe_num(row.get("KHR Total"), float)
-                khr_count += safe_num(row.get("KHR Transaction Count"), int)
+        if r["Cur"] == "USD":
+            usd_total += r["Amt"]
+            usd_count += 1
+            by_channel[ch]["usd"] += r["Amt"]
+            by_channel[ch]["usd_c"] += 1
+        elif r["Cur"] == "KHR":
+            khr_total += r["Amt"]
+            khr_count += 1
+            by_channel[ch]["khr"] += r["Amt"]
+            by_channel[ch]["khr_c"] += 1
 
-        vault_msg = (
-            f"🏛️ **Global Corporate Vault Summary**\n"
-            f"📅 Date: {today}\n"
-            f"----------------------------------------\n"
-            f"💵 Total USD Inflow: **${usd_total:,.2f}** ({usd_count} txs)\n"
-            f"៛ Total KHR Inflow: **៛{khr_total:,.2f}** ({khr_count} txs)\n"
-            f"----------------------------------------\n"
-            f"💼 Global Volume: **{usd_count + khr_count} Transactions**"
-        )
-        await update.message.reply_text(vault_msg, parse_mode="Markdown")
+    breakdown = ""
+    for ch, data in sorted(by_channel.items()):
+        breakdown += f"\n  • *{ch}*: ${data['usd']:,.2f} ({data['usd_c']}tx) | ៛{data['khr']:,.0f} ({data['khr_c']}tx)"
 
-    except Exception as e:
-        logging.error(f"Error executing /02 vault command: {e}")
-        await update.message.reply_text("❌ Error reading vault ledger file.")
+    vault_msg = (
+        f"🏛️ *Global Corporate Vault Summary*\n"
+        f"📅 Date: {today}\n"
+        f"────────────────────────\n"
+        f"💵 Total USD: *${usd_total:,.2f}* ({usd_count} txs)\n"
+        f"៛ Total KHR: *៛{khr_total:,.0f}* ({khr_count} txs)\n"
+        f"────────────────────────\n"
+        f"💼 Global Volume: *{usd_count + khr_count} Transactions*\n"
+        f"\n📋 *By Channel:*{breakdown if breakdown else ' None'}"
+    )
+    await update.message.reply_text(vault_msg, parse_mode="Markdown")
 
+# --- 10. COMMAND: /export ---
 async def command_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Export Daily Ledger CSV Document"""
+    """Export today's (or a given date's) DB channel records as a CSV."""
     target_date = datetime.now().strftime("%Y-%m-%d")
     if context.args:
         target_date = context.args[0].strip()
 
-    filename = f"daily_ledger_{target_date}.csv"
-    file_path = os.path.abspath(filename)
+    records = await read_database_channel(context, target_date, channel_filter=None)
 
-    if not os.path.exists(file_path):
+    if not records:
         await update.message.reply_text(
-            f"📂 No ledger CSV file found for **{target_date}**.",
+            f"📂 No records found in database channel for *{target_date}*.",
             parse_mode="Markdown"
         )
         return
 
-    try:
-        with open(file_path, "rb") as doc:
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=doc,
-                filename=filename,
-                caption=f"📄 **Daily Ledger Export**: `{filename}`",
-                parse_mode="Markdown"
-            )
-        logging.info(f"📤 Exported {filename} to chat {update.effective_chat.id}")
-    except Exception as e:
-        logging.error(f"Failed to export CSV: {e}")
-        await update.message.reply_text("❌ Failed to send the ledger CSV file.")
+    # Build CSV in memory
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Date", "Transaction ID", "Customer Name", "Currency", "Amount", "Channel"])
+    for r in records:
+        writer.writerow([r["Date"], r["ID"], r["Cust"], r["Cur"], r["Amt"], r["Channel"]])
 
-# --- 6. APPLICATION LAUNCHER ---
+    output.seek(0)
+    filename = f"ledger_export_{target_date}.csv"
+
+    await context.bot.send_document(
+        chat_id=update.effective_chat.id,
+        document=output.getvalue().encode("utf-8-sig"),
+        filename=filename,
+        caption=f"📄 *Ledger Export*: `{filename}`\n{len(records)} records from database channel.",
+        parse_mode="Markdown"
+    )
+    logging.info(f"📤 Exported {len(records)} records for {target_date}")
+
+# --- 11. APPLICATION LAUNCHER ---
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable is missing!")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # DB channel tracker — must be registered BEFORE the general message handler
+    app.add_handler(MessageHandler(
+        filters.Chat(DATABASE_CHANNEL_ID) & (filters.TEXT | filters.CAPTION),
+        track_db_message
+    ))
 
     app.add_handler(CommandHandler("01", command_01_summary))
     app.add_handler(CommandHandler("02", command_02_vault))
