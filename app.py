@@ -25,16 +25,14 @@ logging.basicConfig(
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN")
-SUPER_ADMIN_ID       = int(os.getenv("SUPER_ADMIN_ID", "0"))
-MASTER_GROUP_ID      = int(os.getenv("MASTER_GROUP_ID", "0"))
-DATABASE_CHANNEL_ID  = int(os.getenv("DATABASE_CHANNEL_ID", "0"))
-RAW_TOPIC_MAPPINGS   = os.getenv("TOPIC_MAPPINGS", "{}")
-
-# GitHub Gist persistence — add these to your GitHub Actions secrets
-GIST_TOKEN   = os.getenv("GIST_TOKEN")    # GitHub PAT with gist scope
-GIST_ID      = os.getenv("GIST_ID")       # ID of an existing gist (create one manually first)
-GIST_FILE    = "ledger_cache.json"
+TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
+SUPER_ADMIN_ID      = int(os.getenv("SUPER_ADMIN_ID", "0"))
+MASTER_GROUP_ID     = int(os.getenv("MASTER_GROUP_ID", "0"))
+DATABASE_CHANNEL_ID = int(os.getenv("DATABASE_CHANNEL_ID", "0"))
+RAW_TOPIC_MAPPINGS  = os.getenv("TOPIC_MAPPINGS", "{}")
+GIST_TOKEN          = os.getenv("GIST_TOKEN")
+GIST_ID             = os.getenv("GIST_ID")
+GIST_FILE           = "ledger_cache.json"
 
 # --- 2. PARSE TOPIC MAPPINGS ---
 SALES_MAP = {}
@@ -53,7 +51,6 @@ except Exception as e:
 
 # --- 3. GIST PERSISTENCE ---
 async def gist_load() -> dict:
-    """Load db_messages from GitHub Gist on startup."""
     if not GIST_TOKEN or not GIST_ID:
         logging.warning("⚠️ GIST_TOKEN or GIST_ID not set — persistence disabled.")
         return {}
@@ -71,7 +68,6 @@ async def gist_load() -> dict:
         return {}
 
 async def gist_save(db_messages: dict):
-    """Persist db_messages to GitHub Gist."""
     if not GIST_TOKEN or not GIST_ID:
         return
     try:
@@ -229,21 +225,19 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 sent = await context.bot.send_message(chat_id=DATABASE_CHANNEL_ID, text=db_payload)
 
-                # Store in memory + persist to Gist
                 db_messages: dict = context.application.bot_data.setdefault("db_messages", {})
                 db_messages[sent.message_id] = db_payload
                 await gist_save(db_messages)
 
-                # Local CSV backup
                 filename = f"daily_ledger_{today}.csv"
                 file_exists = os.path.exists(filename)
                 with open(filename, mode='a', newline='', encoding='utf-8-sig') as f:
                     writer = csv.writer(f)
                     if not file_exists:
-                        writer.writerow(["Date","Transaction ID","Customer Name",
-                                         "USD Total","USD Transaction Count",
-                                         "KHR Total","KHR Transaction Count",
-                                         "Transaction Count","Salesperson"])
+                        writer.writerow(["Date", "Transaction ID", "Customer Name",
+                                         "USD Total", "USD Transaction Count",
+                                         "KHR Total", "KHR Transaction Count",
+                                         "Transaction Count", "Salesperson"])
                     is_usd = currency_key == "USD"
                     writer.writerow([today, f'="{transaction_id}"', customer_name,
                                      amount if is_usd else 0.0, 1 if is_usd else 0,
@@ -267,9 +261,8 @@ async def forward_and_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 8. COMMANDS ---
 async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # If in master group, must be inside a topic thread
     if update.effective_chat.id == MASTER_GROUP_ID and not update.effective_message.message_thread_id:
-        await update.message.reply_text("⛔ Use this command inside a topic thread.")
+        await update.message.reply_text("⛔ Use /01 inside a topic thread.")
         return
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -298,10 +291,10 @@ async def command_01_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 async def command_02_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
-     if update.effective_chat.id != MASTER_GROUP_ID:
+    if update.effective_chat.id != MASTER_GROUP_ID:
         await update.message.reply_text("⛔ This command is only available in the master group.")
         return
-    
+
     if SUPER_ADMIN_ID and update.effective_user.id != SUPER_ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized.")
         return
@@ -339,11 +332,10 @@ async def command_02_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def command_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Must be called from master group only
     if update.effective_chat.id != MASTER_GROUP_ID:
         await update.message.reply_text("⛔ This command is only available in the master group.")
         return
-        
+
     target_date = context.args[0].strip() if context.args else datetime.now().strftime("%Y-%m-%d")
     records = await read_database_channel(context, target_date)
     if not records:
