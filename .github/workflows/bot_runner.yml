@@ -1,17 +1,16 @@
 name: 24-7 Telegram Forward Bot Engine
 
-# 🎯 THE PERMANENT FIX: Automatically kills the old instance when a new one triggers
 concurrency:
   group: telegram-bot-runtime
   cancel-in-progress: true
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Auto-restarts every 6 hours to prevent GitHub timeouts
-  workflow_dispatch:      # Allows you to manual start/restart anytime
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
   push:
     branches:
-      - main              # Restarts automatically when you update code
+      - main
 
 jobs:
   run-engine:
@@ -26,7 +25,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install python-telegram-bot python-dotenv
+        run: pip install python-telegram-bot python-dotenv aiohttp
 
       - name: Run Bot Engine
         env:
@@ -35,4 +34,6 @@ jobs:
           MASTER_GROUP_ID: ${{ secrets.MASTER_GROUP_ID }}
           DATABASE_CHANNEL_ID: ${{ secrets.DATABASE_CHANNEL_ID }}
           TOPIC_MAPPINGS: ${{ secrets.TOPIC_MAPPINGS }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
         run: python app.py
